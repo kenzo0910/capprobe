@@ -10,6 +10,8 @@
 
 ![CAPProbe architecture](docs/architecture.svg)
 
+**▶ [60-second demo video](docs/demo.mp4)** — the full 3-hop A2A run (100/A), the failure case (15/F), and the architecture, at a glance.
+
 ---
 
 ## Why this wins on A2A composability

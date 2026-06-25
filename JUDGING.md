@@ -69,6 +69,11 @@ Run these once with real credentials (`CROO_MODE=live`) and capture output for t
 
 ## 6. Demo video script (≤ 5 min)
 
+> A 60-second auto-generated cut covering the offline run + architecture ships in the repo at
+> [`docs/demo.mp4`](docs/demo.mp4). Append the live-on-Base segment (step 3) — a screen capture of
+> `npm run demo:full` against your registered agents + the two USDC settlements on BaseScan — to
+> reach the full ≤5-min cut.
+
 1. **0:00 – 0:40 — Problem.** "CAP makes every agent a paid endpoint. How do you know yours
    actually negotiates, settles, and delivers — before customers and USDC hit it?"
 2. **0:40 – 1:40 — Offline demo.** `node scripts/test-local.js`; narrate the 3‑hop chain and the
