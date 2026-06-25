@@ -80,10 +80,7 @@ async function runRequesterDemo(overrides = {}) {
     );
   }
   const orderId = created.payload.orderId;
-  log.info("order created — paying escrow in USDC", {
-    orderId,
-    amount: created.payload.amount,
-  });
+  log.info("order created — paying escrow in USDC", { orderId });
 
   await withTimeout(agent.pay(orderId), 90_000, "payOrder");
   log.info("payment sent — waiting for CAPProbe to deliver the report");

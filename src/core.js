@@ -10,8 +10,13 @@
  *   3. `runProbe()` — the conformance-test engine that drives a target agent
  *      through the full negotiate -> pay -> deliver lifecycle and scores it.
  *
- * Everything else in the repo talks only to `createAgent()` + `runProbe()`, so
- * switching between the real network and the offline mock is a single env flag.
+ * The CAP surface here is reconciled against @croo-network/sdk@0.2.1:
+ *   - events arrive via `stream.onAny(event => …)`; `event.type` is the wire name
+ *     (e.g. "order_negotiation_created", "order_paid"); ids are snake_case.
+ *   - `acceptNegotiation` returns `{ negotiation, order }` (orderId is nested).
+ *   - requirements live on the Negotiation, not the Order.
+ *   - `Config` is `{ baseURL, wsURL?, rpcURL?, logger? }` (no private key; the
+ *     agent's AA wallet is managed server-side and keyed by the croo_sk SDK-Key).
  */
 
 const fs = require("fs");
@@ -20,29 +25,19 @@ const { EventEmitter } = require("events");
 const { Logger } = require("./logger");
 
 // ---------------------------------------------------------------------------
-// Canonical lifecycle events (snake_case) used internally. The real SDK may emit
-// these under an `EventType` enum and/or PascalCase aliases, so the bridge below
-// subscribes to every plausible name and re-emits the canonical one.
+// Canonical lifecycle events — values match the real SDK's EventType wire names.
 // ---------------------------------------------------------------------------
 const EV = {
-  NEGOTIATION_CREATED: "negotiation_created",
-  NEGOTIATION_REJECTED: "negotiation_rejected",
+  NEGOTIATION_CREATED: "order_negotiation_created",
+  NEGOTIATION_REJECTED: "order_negotiation_rejected",
+  NEGOTIATION_EXPIRED: "order_negotiation_expired",
   ORDER_CREATED: "order_created",
   ORDER_PAID: "order_paid",
   ORDER_COMPLETED: "order_completed",
   ORDER_REJECTED: "order_rejected",
   ORDER_EXPIRED: "order_expired",
 };
-
-const SDK_EVENT_ALIASES = {
-  [EV.NEGOTIATION_CREATED]: ["negotiation_created", "NegotiationCreated"],
-  [EV.NEGOTIATION_REJECTED]: ["negotiation_rejected", "NegotiationRejected"],
-  [EV.ORDER_CREATED]: ["order_created", "OrderCreated"],
-  [EV.ORDER_PAID]: ["order_paid", "OrderPaid"],
-  [EV.ORDER_COMPLETED]: ["order_completed", "OrderCompleted"],
-  [EV.ORDER_REJECTED]: ["order_rejected", "OrderRejected"],
-  [EV.ORDER_EXPIRED]: ["order_expired", "OrderExpired"],
-};
+const KNOWN_EVENTS = new Set(Object.values(EV));
 
 // ---------------------------------------------------------------------------
 // Config
@@ -80,10 +75,11 @@ function loadConfig(overrides = {}) {
   ).toLowerCase();
   return {
     mode, // 'mock' | 'live'
-    apiKey: process.env.CROO_API_KEY || "", // croo_sk_...
+    apiKey: process.env.CROO_API_KEY || "", // croo_sk_... (the SDK-Key)
     baseURL: process.env.CROO_API_URL || "https://api.croo.network",
     wsURL: process.env.CROO_WS_URL || "wss://api.croo.network/ws",
     rpcURL: process.env.BASE_RPC_URL || "https://mainnet.base.org",
+    // Optional: only used by the one-time wallet-deploy/fund step, NOT the SDK runtime.
     privateKey: process.env.WALLET_PRIVATE_KEY || "",
     capprobeServiceId:
       process.env.CAPPROBE_SERVICE_ID || "capprobe.conformance.v1",
@@ -95,13 +91,12 @@ function loadConfig(overrides = {}) {
 }
 
 function assertLiveConfig(cfg) {
-  const missing = [];
-  if (!cfg.apiKey) missing.push("CROO_API_KEY (croo_sk_...)");
-  if (!cfg.privateKey) missing.push("WALLET_PRIVATE_KEY");
-  if (missing.length) {
+  // The SDK authenticates with the croo_sk SDK-Key; the agent's AA wallet is
+  // managed server-side, so no private key is required at runtime.
+  if (!cfg.apiKey) {
     throw new Error(
-      `Live mode requires: ${missing.join(", ")}. ` +
-        `Set them in .env (see .env.example), or run with CROO_MODE=mock for the offline demo.`,
+      "Live mode requires CROO_API_KEY (croo_sk_...). Set it in .env (see .env.example), " +
+        "or run with CROO_MODE=mock for the offline demo.",
     );
   }
 }
@@ -137,16 +132,16 @@ function redact(value) {
     .replace(/0x[0-9a-fA-F]{40,}/g, "0x***");
 }
 
-// Normalize an event payload so downstream code reads stable field names
-// regardless of whether the source was the real SDK (snake_case) or the mock.
-function normalizePayload(raw) {
-  const p = raw || {};
+// Normalize a CAP event payload so downstream code reads stable field names,
+// whether it came from the real SDK (snake_case Event) or the mock.
+function normalizePayload(event) {
+  const p = event || {};
   return {
-    orderId: pick(p, ["order_id", "orderId", "id"]),
+    type: p.type,
+    orderId: pick(p, ["order_id", "orderId"]),
     negotiationId: pick(p, ["negotiation_id", "negotiationId"]),
     serviceId: pick(p, ["service_id", "serviceId"]),
-    requirements: pick(p, ["requirements", "requirement", "req"]),
-    amount: pick(p, ["amount", "amount_usdc", "price"]),
+    status: p.status,
     reason: pick(p, ["reason", "message"]),
     raw: p,
   };
@@ -229,25 +224,19 @@ class CapAgent {
     const stream = await this.client.connectWebSocket();
     this._stream = stream;
 
-    // Bridge every aliased SDK event name to our canonical emitter.
-    for (const [canonical, aliases] of Object.entries(SDK_EVENT_ALIASES)) {
-      const seen = new Set();
-      for (const alias of aliases) {
-        if (!alias || seen.has(alias)) continue;
-        seen.add(alias);
+    // The SDK stream (and the mock) both expose onAny — one bridge for every
+    // event type, dispatched by `event.type`. Falls back to per-type listeners
+    // for any exotic stream that lacks onAny.
+    if (typeof stream.onAny === "function") {
+      stream.onAny((event) => this._emitEvent(event));
+    } else {
+      for (const type of KNOWN_EVENTS) {
         try {
-          stream.on(alias, (raw) => this._emit(canonical, raw));
+          stream.on(type, (event) => this._emitEvent(event));
         } catch (_) {
-          /* stream may not accept this alias — fine */
+          /* stream may not accept this type — fine */
         }
       }
-    }
-    try {
-      stream.on("error", (e) =>
-        this.log.warn("stream error", { err: e && e.message }),
-      );
-    } catch (_) {
-      /* some streams have no error channel */
     }
 
     this._connected = true;
@@ -255,14 +244,16 @@ class CapAgent {
     return this;
   }
 
-  _emit(canonical, raw) {
-    const p = normalizePayload(raw);
+  _emitEvent(event) {
+    const type = event && event.type;
+    if (!type || !KNOWN_EVENTS.has(type)) return; // ignore heartbeats / unknown
+    const p = normalizePayload(event);
     this.log.debug("event", {
-      event: canonical,
+      event: type,
       orderId: p.orderId,
       negotiationId: p.negotiationId,
     });
-    this.events.emit(canonical, p);
+    this.events.emit(type, p);
   }
 
   // Subscribe with a crash-proof wrapper: a throw/rejection in handler code is
@@ -285,43 +276,52 @@ class CapAgent {
     if (typeof this.client.registerService === "function") {
       return this.client.registerService(serviceId, meta);
     }
-    // The live SDK registers services via the CROO Agent Store dashboard, not at runtime.
-    this.log.info("service registration is managed via the CROO Agent Store", {
-      serviceId,
-    });
+    // The live SDK has no runtime registerService — services are listed on the
+    // CROO Agent Store dashboard. WARN so a live operator who skipped that step
+    // understands why no negotiations are arriving.
+    this.log.warn(
+      "registerService is a no-op in live mode — list this service on the CROO Agent Store " +
+        "(https://agent.croo.network/) before starting the provider, or negotiations will never arrive.",
+      { serviceId },
+    );
     return { serviceId, registered: false, note: "register via Agent Store" };
   }
 
   async negotiate(req) {
     const r = await this.client.negotiateOrder(req);
     return {
-      negotiationId: pick(r, ["id", "negotiation_id", "negotiationId"]),
+      negotiationId: pick(r, ["negotiationId", "negotiation_id", "id"]),
       raw: r,
     };
   }
 
   async acceptNegotiation(negotiationId) {
     const r = await this.client.acceptNegotiation(negotiationId);
-    return { orderId: pick(r, ["order_id", "orderId", "id"]), raw: r };
+    // SDK returns { negotiation, order }; orderId is nested under order.
+    const orderId =
+      (r && r.order && (r.order.orderId || r.order.order_id)) ||
+      pick(r, ["order_id", "orderId", "id"]);
+    return { orderId, raw: r };
   }
 
   async rejectNegotiation(negotiationId, reason) {
     if (typeof this.client.rejectNegotiation === "function") {
-      return this.client.rejectNegotiation(negotiationId, reason);
+      return this.client.rejectNegotiation(negotiationId, reason || "rejected");
     }
     return undefined;
   }
 
   async pay(orderId) {
     const r = await this.client.payOrder(orderId);
-    return { txHash: pick(r, ["tx_hash", "txHash"]), raw: r };
+    return { txHash: pick(r, ["txHash", "tx_hash"]), raw: r };
   }
 
-  async deliver(orderId, { type, text }) {
-    const r = await this.client.deliverOrder(orderId, {
-      deliverableType: type,
-      deliverableText: text,
-    });
+  async deliver(orderId, { type, text, schema }) {
+    // deliverableType is 'text' | 'schema' per the SDK (not a MIME type).
+    const req = { deliverableType: type || "text" };
+    if (text != null) req.deliverableText = text;
+    if (schema != null) req.deliverableSchema = schema;
+    const r = await this.client.deliverOrder(orderId, req);
     return { raw: r };
   }
 
@@ -330,11 +330,18 @@ class CapAgent {
     return this.client.getOrder(orderId);
   }
 
+  async getNegotiation(negotiationId) {
+    if (!negotiationId || typeof this.client.getNegotiation !== "function")
+      return null;
+    return this.client.getNegotiation(negotiationId);
+  }
+
   async getDelivery(orderId) {
     const d = await this.client.getDelivery(orderId);
     return {
-      type: pick(d, ["deliverable_type", "deliverableType", "type"]),
-      text: pick(d, ["deliverable_text", "deliverableText", "text", "content"]),
+      type: pick(d, ["deliverableType", "deliverable_type", "type"]),
+      text: pick(d, ["deliverableText", "deliverable_text", "text", "content"]),
+      schema: pick(d, ["deliverableSchema", "deliverable_schema"]),
       raw: d,
     };
   }
@@ -364,14 +371,23 @@ function createAgent(cfg, { name } = {}) {
       baseURL: cfg.baseURL,
       wsURL: cfg.wsURL,
       rpcURL: cfg.rpcURL,
-      privateKey: cfg.privateKey,
-      logger: console,
+      // Route SDK-internal logs (which include tx hashes / URLs) through our
+      // redacting Logger instead of raw console, so secrets are scrubbed.
+      logger,
     };
     client = new sdk.AgentClient(sdkConfig, cfg.apiKey);
   } else {
     const { MockAgentClient } = require("./mock-sdk");
+    // Pass only the fields the mock needs — never spread secrets (apiKey/privateKey)
+    // into the mock's stored config.
+    const mockConfig = {
+      baseURL: cfg.baseURL,
+      wsURL: cfg.wsURL,
+      rpcURL: cfg.rpcURL,
+      mode: cfg.mode,
+    };
     client = new MockAgentClient(
-      { ...cfg },
+      mockConfig,
       cfg.apiKey || `croo_sk_mock_${name || "agent"}`,
     );
   }
@@ -387,7 +403,7 @@ const CHECK_WEIGHTS = {
   "discovery.reachable": 15, // negotiateOrder returns a negotiation id
   "negotiation.accepted": 15, // provider accepts -> order_created
   "order.payable": 10, // payOrder accepted
-  "payment.settled": 15, // escrow locked / tx returned
+  "payment.settled": 15, // escrow locks / settlement tx returned
   "delivery.received": 20, // order_completed within SLA window
   "sla.met": 10, // delivery within the advertised SLA target
   "deliverable.present": 5, // non-empty deliverable
@@ -398,9 +414,9 @@ const RECOMMENDATIONS = {
   "discovery.reachable":
     "Service did not respond to negotiateOrder. Confirm it is listed/active on the Agent Store and the serviceId is correct.",
   "negotiation.accepted":
-    "No order_created emitted. Ensure your agent listens for negotiation_created and calls acceptNegotiation().",
+    "No order_created emitted. Ensure your agent listens for order_negotiation_created and calls acceptNegotiation().",
   "order.payable":
-    "payOrder failed. Check the order amount/escrow config and that the requester AA wallet holds enough USDC.",
+    "payOrder failed. Check the order price/escrow config and that the requester AA wallet holds enough USDC.",
   "payment.settled":
     "Payment did not settle on Base. Verify CAPVault escrow and rpcURL connectivity.",
   "delivery.received":
@@ -408,9 +424,9 @@ const RECOMMENDATIONS = {
   "sla.met":
     "Delivery arrived but exceeded the SLA target. Optimize provider latency or raise the advertised SLA.",
   "deliverable.present":
-    "Delivery contained no deliverableText/objectKey. Return a non-empty deliverable.",
+    "Delivery contained no deliverableText/deliverableSchema. Return a non-empty deliverable.",
   "deliverable.valid":
-    "Deliverable failed validation. If you advertise application/json, return parseable JSON.",
+    "Deliverable failed validation. If you advertise JSON output, return parseable JSON in deliverableText.",
 };
 
 class ProbeError extends Error {
@@ -442,12 +458,20 @@ function scoreChecks(checks) {
   return { score, grade };
 }
 
+function looksLikeJson(text) {
+  const t = String(text).trim();
+  return t.startsWith("{") || t.startsWith("[");
+}
+
 function validateDeliverable(delivery, expectJson) {
   const text = delivery && delivery.text;
-  if (!text) return { ok: false, detail: "no deliverable text" };
+  if (!text && !(delivery && delivery.schema))
+    return { ok: false, detail: "no deliverable text/schema" };
+  if (!text) return { ok: true, detail: "schema deliverable present" };
   const type = String(delivery.type || "").toLowerCase();
-  const looksJson = expectJson || type.includes("json");
-  if (looksJson) {
+  const shouldParse =
+    expectJson || type.includes("json") || looksLikeJson(text);
+  if (shouldParse) {
     try {
       JSON.parse(text);
       return { ok: true, detail: "valid JSON deliverable" };
@@ -548,18 +572,20 @@ async function runProbe(agent, opts) {
       Date.now() - negStart,
     );
 
+    // Scope every Phase-1 waiter to THIS negotiation so a concurrent probe's
+    // rejection/expiry on the shared agent cannot resolve the wrong runProbe.
+    // Conservative: accept when either id is absent (some streams omit it).
+    const sameNeg = (p) =>
+      !neg.negotiationId ||
+      !p.negotiationId ||
+      p.negotiationId === neg.negotiationId;
     const res = await waitForFirst(
       agent,
       [
-        {
-          event: EV.ORDER_CREATED,
-          predicate: (p) =>
-            !neg.negotiationId ||
-            !p.negotiationId ||
-            p.negotiationId === neg.negotiationId,
-        },
-        { event: EV.NEGOTIATION_REJECTED, predicate: () => true },
-        { event: EV.ORDER_REJECTED, predicate: () => true },
+        { event: EV.ORDER_CREATED, predicate: sameNeg },
+        { event: EV.NEGOTIATION_REJECTED, predicate: sameNeg },
+        { event: EV.NEGOTIATION_EXPIRED, predicate: sameNeg },
+        { event: EV.ORDER_REJECTED, predicate: sameNeg },
       ],
       T.accept,
       "order_created / negotiation_rejected",
@@ -599,10 +625,14 @@ async function runProbe(agent, opts) {
       addCheck("order.payable", false, e.message, Date.now() - payStart);
       throw e;
     }
+    // Settlement is only credited when the SDK returns a settlement tx hash —
+    // a conformance tool must not award "settled" for a payment it can't evidence.
     addCheck(
       "payment.settled",
-      true,
-      payRes.txHash ? `tx ${redact(payRes.txHash)}` : "escrow locked",
+      Boolean(payRes.txHash),
+      payRes.txHash
+        ? `tx ${redact(payRes.txHash)}`
+        : "no settlement tx returned",
     );
 
     // Phase 3 — delivery within SLA
@@ -641,7 +671,7 @@ async function runProbe(agent, opts) {
     const hasText = !!(delivery.text && String(delivery.text).length);
     addCheck(
       "deliverable.present",
-      hasText,
+      hasText || !!delivery.schema,
       hasText
         ? `type=${delivery.type || "n/a"}, ${String(delivery.text).length} bytes`
         : "empty deliverable",
@@ -694,6 +724,7 @@ module.exports = {
   // agent
   createAgent,
   CapAgent,
+  normalizePayload,
   // events + utils
   EV,
   sleep,

@@ -6,6 +6,12 @@
 
 **Track:** Developer Tooling (also fits Open) · **License:** MIT · **Built on:** CROO Agent Protocol (CAP), USDC on Base
 
+[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml) · verified against `@croo-network/sdk@0.2.1`
+
+![CAPProbe architecture](docs/architecture.svg)
+
+> Replace `OWNER/REPO` in the badge URL after you push to GitHub.
+
 ---
 
 ## Why this wins on A2A composability
@@ -119,8 +125,10 @@ recommendation.
    cp .env.example .env
    ```
 4. **Fund** your agent's AA wallet with USDC on Base (so CAPProbe can pay the agents it probes).
+   The AA wallet is managed server‑side and keyed by your `croo_sk_` SDK‑Key — the SDK does **not**
+   take a raw private key at runtime.
 5. **List** your service on the CROO Agent Store with `serviceId = capprobe.conformance.v1`,
-   deliverable type `application/json`, and your price/SLA.
+   deliverable type `text`, and your price/SLA.
 6. **Run the provider** and leave it serving 24/7:
    ```bash
    CROO_MODE=live npm run start:provider
@@ -130,23 +138,51 @@ recommendation.
    CROO_MODE=live npm run probe -- <targetServiceId>
    ```
 
-### How the adapter maps to `@croo-network/sdk`
+### How the adapter maps to `@croo-network/sdk` (v0.2.1, verified)
 
 `CapAgent` (in `core.js`) is a thin normalization layer so the rest of the code never branches on
-mode. It wraps the real client one‑to‑one:
+mode. The mappings below are asserted in CI by `test/sdk-contract.test.js` against the installed
+SDK, so drift fails the build with a precise message instead of mis‑probing in production.
 
-| CapAgent method                 | `@croo-network/sdk` call                                             |
-| ------------------------------- | -------------------------------------------------------------------- |
-| `connect()`                     | `client.connectWebSocket()`                                          |
-| `negotiate(req)`                | `client.negotiateOrder(req)`                                         |
-| `acceptNegotiation(id)`         | `client.acceptNegotiation(id)`                                       |
-| `pay(orderId)`                  | `client.payOrder(orderId)`                                           |
-| `deliver(orderId, {type,text})` | `client.deliverOrder(orderId, { deliverableType, deliverableText })` |
-| `getDelivery(orderId)`          | `client.getDelivery(orderId)`                                        |
-| `on('order_paid', …)`           | `stream.on(EventType.OrderPaid, …)`                                  |
+> The `→ { … }` column shows the **fields CapAgent extracts**, not the raw SDK return type. The SDK
+> returns full objects (e.g. `negotiateOrder` → a 12‑field `Negotiation`); CapAgent narrows them to
+> a small stable surface — see the method bodies in `core.js` for the exact `pick()`s.
 
-Events are subscribed under every plausible alias (`order_paid` / `OrderPaid` / `EventType.OrderPaid`)
-and payloads normalized (`order_id`→`orderId`), so the tool is resilient to minor SDK naming drift.
+| CapAgent method                 | `@croo-network/sdk` call                                             | Note                                 |
+| ------------------------------- | -------------------------------------------------------------------- | ------------------------------------ |
+| `connect()`                     | `client.connectWebSocket()` → `stream.onAny(event ⇒ …)`              | events dispatched by `event.type`    |
+| `negotiate(req)`                | `client.negotiateOrder(req)` → `{ negotiationId }`                   | requirements is a JSON string        |
+| `acceptNegotiation(id)`         | `client.acceptNegotiation(id)` → `{ negotiation, order }`            | orderId is **nested** under `order`  |
+| `getNegotiation(id)`            | `client.getNegotiation(id)` → `{ requirements }`                     | requirements live on the negotiation |
+| `pay(orderId)`                  | `client.payOrder(orderId)` → `{ order, txHash }`                     | escrow lock + USDC settlement        |
+| `deliver(orderId, {type,text})` | `client.deliverOrder(orderId, { deliverableType, deliverableText })` | `deliverableType` is `text`/`schema` |
+| `getDelivery(orderId)`          | `client.getDelivery(orderId)` → `{ deliverableText }`                |                                      |
+
+Real wire event names: `order_negotiation_created`, `order_negotiation_rejected`, `order_created`,
+`order_paid`, `order_completed`, `order_rejected`, `order_expired`. Payloads are normalized
+(`order_id`→`orderId`) so downstream code reads stable field names.
+
+---
+
+## Use CAPProbe as a CI gate (GitHub Action)
+
+Block a deploy whenever your agent stops conforming. Add to any repo:
+
+```yaml
+# .github/workflows/conformance.yml
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: OWNER/REPO@v1 # the CAPProbe repo
+        with:
+          service-id: my.agent.v1
+          api-key: ${{ secrets.CROO_API_KEY }}
+          min-score: "90" # fail the build below this
+```
+
+The action runs a live probe and exits non‑zero when the score is below `min-score`. Same engine
+as `npm run probe`, so behaviour is identical locally and in CI.
 
 ---
 
@@ -154,18 +190,19 @@ and payloads normalized (`order_id`→`orderId`), so the tool is resilient to mi
 
 All settings come from env vars (see `.env.example`). The demo needs none of them.
 
-| Variable                 | Default                     | Purpose                                             |
-| ------------------------ | --------------------------- | --------------------------------------------------- |
-| `CROO_MODE`              | `mock`                      | `mock` (offline demo) or `live` (real CAP)          |
-| `CROO_API_KEY`           | —                           | Agent Store key, `croo_sk_…` (live only)            |
-| `WALLET_PRIVATE_KEY`     | —                           | Agent wallet key for signing/settlement (live only) |
-| `CROO_API_URL`           | `https://api.croo.network`  | CAP REST endpoint                                   |
-| `CROO_WS_URL`            | `wss://api.croo.network/ws` | CAP event stream                                    |
-| `BASE_RPC_URL`           | `https://mainnet.base.org`  | Base RPC for settlement                             |
-| `CAPPROBE_SERVICE_ID`    | `capprobe.conformance.v1`   | CAPProbe's own listed service id                    |
-| `TARGET_SERVICE_ID`      | `demo.echo.v1`              | Default target to probe                             |
-| `PROBE_PRICE_USDC`       | `0.50`                      | Advertised price                                    |
-| `LOG_LEVEL` / `LOG_JSON` | `info` / `false`            | Logging verbosity / format                          |
+| Variable                 | Default                     | Purpose                                                                               |
+| ------------------------ | --------------------------- | ------------------------------------------------------------------------------------- |
+| `CROO_MODE`              | `mock`                      | `mock` (offline demo) or `live` (real CAP)                                            |
+| `CROO_API_KEY`           | —                           | Agent Store SDK‑Key, `croo_sk_…` (live only)                                          |
+| `WALLET_PRIVATE_KEY`     | —                           | Optional — only the one‑time wallet deploy/fund step; the SDK runtime does not use it |
+| `CROO_API_URL`           | `https://api.croo.network`  | CAP REST endpoint                                                                     |
+| `CROO_WS_URL`            | `wss://api.croo.network/ws` | CAP event stream                                                                      |
+| `BASE_RPC_URL`           | `https://mainnet.base.org`  | Base RPC for settlement                                                               |
+| `CAPPROBE_SERVICE_ID`    | `capprobe.conformance.v1`   | CAPProbe's own listed service id                                                      |
+| `TARGET_SERVICE_ID`      | `demo.echo.v1`              | Default target to probe                                                               |
+| `PROBE_PRICE_USDC`       | `0.50`                      | Advertised price                                                                      |
+| `MIN_SCORE`              | `60`                        | Min score for `npm run probe` / the Action to exit 0 (CI pass gate)                   |
+| `LOG_LEVEL` / `LOG_JSON` | `info` / `false`            | Logging verbosity / format                                                            |
 
 > Secrets are never printed: the logger redacts `croo_sk_…` keys and long hex (private keys, tx
 > hashes) in every line.
@@ -182,8 +219,16 @@ capprobe/
 │   ├── mock-sdk.js        # in-process CROO server simulation (offline demo/CI)
 │   └── logger.js          # zero-dep structured logger with secret redaction
 ├── scripts/
-│   ├── test-local.js      # offline end-to-end demo + assertions (npm test)
+│   ├── test-local.js      # offline end-to-end demo + assertions (npm run demo)
 │   └── probe.js           # CLI: probe a live agent from the terminal
+├── test/                  # node:test unit + SDK-contract suite (npm run test:unit)
+│   ├── scoring.test.js
+│   ├── adapter.test.js
+│   ├── probe.test.js
+│   └── sdk-contract.test.js
+├── .github/workflows/ci.yml  # CI: tests on node 18/20/22
+├── action.yml             # reusable GitHub Action (CAPProbe as a CI gate)
+├── docs/architecture.svg
 ├── .env.example
 ├── JUDGING.md             # self-review + simulated judge scorecard
 ├── LICENSE                # MIT
@@ -204,14 +249,18 @@ capprobe/
 - Multi‑sample probing (run N requests, report p50/p95 latency & error rate).
 - Reputation feed: publish signed conformance scores other agents can read before transacting.
 - Dispute/refund‑path checks (`paid → rejected/expired` escrow refund behaviour).
-- A hosted dashboard + GitHub Action (`capprobe <serviceId>` as a CI gate).
+- Fund‑transfer services (`require_fund_transfer=true`): probe via `acceptNegotiationWithFundAddress` + `fundAmount/fundToken`.
+- A hosted dashboard on top of the existing GitHub Action.
 
 ## Known limitations (honest)
 
-- Live settlement paths are validated against the CAP docs and the SDK surface; the offline mock
-  is the deterministic test harness. Before mainnet, run `JUDGING.md → Pre‑live verification`.
+- The adapter is verified against `@croo-network/sdk@0.2.1` by an automated contract test; the
+  offline mock mirrors those shapes and is the deterministic harness. The remaining unverified
+  piece is a real mainnet settlement run — see `JUDGING.md → Pre‑live verification`.
 - The probe pays the target real USDC in live mode (by design — it's a real order). Use a small
   `PROBE_PRICE_USDC` and probe agents you own or have permission to test.
+- Current probe covers flat‑priced services. Targets with `require_fund_transfer=true` need the
+  `acceptNegotiationWithFundAddress` + `fundAmount/fundToken` path (on the roadmap).
 
 ## License
 

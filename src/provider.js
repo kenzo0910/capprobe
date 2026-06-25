@@ -12,7 +12,7 @@
  * agent-to-agent-to-agent chain — the core A2A composability story.
  */
 
-const { loadConfig, createAgent, runProbe } = require("./core");
+const { loadConfig, createAgent, runProbe, EV } = require("./core");
 const { Logger } = require("./logger");
 
 function parseRequirements(raw) {
@@ -37,16 +37,26 @@ async function createProvider(overrides = {}) {
       "Pay CAPProbe to run a full negotiate->pay->deliver conformance probe against any " +
       "CAP agent and receive a scored JSON health report with actionable fixes.",
     price: cfg.priceUSDC,
-    deliverableType: "application/json",
+    deliverableType: "text",
   });
   log.info("CAPProbe provider online", {
     serviceId: cfg.capprobeServiceId,
     mode: cfg.mode,
   });
 
-  // Seller side — admission control then accept.
-  agent.on("negotiation_created", async (p) => {
-    const req = parseRequirements(p.requirements);
+  // Seller side — admission control then accept. Requirements live on the
+  // negotiation (not the event), so we fetch it to read the target serviceId.
+  agent.on(EV.NEGOTIATION_CREATED, async (p) => {
+    let req = {};
+    try {
+      const neg = await agent.getNegotiation(p.negotiationId);
+      req = parseRequirements(neg && neg.requirements);
+    } catch (e) {
+      log.warn("getNegotiation failed", {
+        negotiationId: p.negotiationId,
+        err: e.message,
+      });
+    }
     if (!req.targetServiceId) {
       log.warn("rejecting negotiation: requirements missing targetServiceId", {
         negotiationId: p.negotiationId,
@@ -65,22 +75,20 @@ async function createProvider(overrides = {}) {
   });
 
   // Seller side — escrow is locked, do the work and deliver.
-  agent.on("order_paid", async (p) => {
+  agent.on(EV.ORDER_PAID, async (p) => {
     const orderId = p.orderId;
     log.info("order paid — starting conformance probe", { orderId });
 
-    // Recover the customer's requirements (which target to probe, how, SLA).
+    // Recover the customer's requirements: order -> negotiation -> requirements.
     let requirements = {};
     try {
       const order = await agent.getOrder(orderId);
-      requirements = parseRequirements(order && order.requirements);
+      const negId = (order && order.negotiationId) || p.negotiationId;
+      const neg = await agent.getNegotiation(negId);
+      requirements = parseRequirements(neg && neg.requirements);
     } catch (e) {
-      log.warn("getOrder failed; falling back to event payload", {
-        err: e.message,
-      });
+      log.warn("could not recover requirements", { orderId, err: e.message });
     }
-    if (!requirements.targetServiceId)
-      requirements = parseRequirements(p.requirements);
 
     const targetServiceId = requirements.targetServiceId || cfg.targetServiceId;
 
@@ -97,7 +105,7 @@ async function createProvider(overrides = {}) {
         logger: log.child("probe"),
       });
       await agent.deliver(orderId, {
-        type: "application/json",
+        type: "text",
         text: JSON.stringify(report, null, 2),
       });
       log.info("report delivered", {
@@ -117,7 +125,7 @@ async function createProvider(overrides = {}) {
       };
       try {
         await agent.deliver(orderId, {
-          type: "application/json",
+          type: "text",
           text: JSON.stringify(errReport, null, 2),
         });
       } catch (_) {

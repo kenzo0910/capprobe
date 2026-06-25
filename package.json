@@ -13,7 +13,9 @@
   },
   "scripts": {
     "demo": "node scripts/test-local.js",
-    "test": "node scripts/test-local.js",
+    "test": "node --test \"test/**/*.test.js\" && node scripts/test-local.js",
+    "test:unit": "node --test \"test/**/*.test.js\"",
+    "test:e2e": "node scripts/test-local.js",
     "start": "node src/provider.js",
     "start:provider": "node src/provider.js",
     "start:requester": "node src/requester-demo.js",
@@ -33,12 +35,7 @@
     "dorahacks"
   ],
   "dependencies": {},
-  "peerDependencies": {
-    "@croo-network/sdk": "^1.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@croo-network/sdk": {
-      "optional": true
-    }
+  "optionalDependencies": {
+    "@croo-network/sdk": "^0.2.1"
   }
 }

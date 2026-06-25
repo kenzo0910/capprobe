@@ -2,16 +2,14 @@
 
 /**
  * mock-sdk.js — an in-process simulation of the CROO coordination server and the
- * @croo-network/sdk `AgentClient` surface.
+ * @croo-network/sdk@0.2.1 `AgentClient` surface.
  *
  * It lets the whole negotiate -> pay -> deliver lifecycle run locally with zero
  * network, zero USDC and zero `npm install`, so `npm run demo` works on a fresh
- * clone. `MockAgentClient` mirrors the real client's method names exactly, so
+ * clone. `MockAgentClient` mirrors the real client's method names AND return
+ * shapes (e.g. acceptNegotiation -> { negotiation, order }; requirements live on
+ * the negotiation; events arrive via stream.onAny with snake_case ids), so
  * `core.js` wraps the real SDK and this mock through the identical code path.
- *
- * Routing model: a single per-process `MockBroker` connects a requester client to
- * whichever provider client registered the target `serviceId`, and pushes the
- * matching lifecycle events to each party's stream — exactly like the real WS hub.
  */
 
 const { EventEmitter } = require("events");
@@ -37,9 +35,9 @@ class MockBroker {
   constructor() {
     this.clients = new Map(); // agentId -> MockAgentClient
     this.providersByService = new Map(); // serviceId -> MockAgentClient
-    this.negotiations = new Map(); // negId -> negotiation
-    this.orders = new Map(); // orderId -> order
-    this.deliveries = new Map(); // orderId -> { deliverable_type, deliverable_text }
+    this.negotiations = new Map(); // negId -> negotiation record
+    this.orders = new Map(); // orderId -> order record
+    this.deliveries = new Map(); // orderId -> { deliverableType, deliverableText }
   }
 
   attach(client) {
@@ -50,12 +48,12 @@ class MockBroker {
     this.providersByService.set(serviceId, client);
   }
 
-  // Push an event to a client's stream after a small async delay (mimics the WS hub).
-  _push(client, event, payload) {
+  // Push a wire Event to a client's stream after a small async delay.
+  _push(client, event) {
     if (!client || !client.stream) return;
     setTimeout(() => {
       try {
-        client.stream.emit(event, payload);
+        client.stream.emit(event.type, event);
       } catch (_) {
         /* a downstream handler threw — never crash the broker */
       }
@@ -67,35 +65,44 @@ class MockBroker {
     const negId = nextId("neg");
     const provider = this.providersByService.get(serviceId);
     const neg = {
-      id: negId,
+      negotiationId: negId,
       serviceId,
-      requirements: req.requirements,
-      requester,
-      provider,
+      requirements: req.requirements || "",
+      requesterAgentId: requester.id,
+      providerAgentId: provider ? provider.id : "",
       status: "pending",
+      _requester: requester,
+      _provider: provider,
     };
     this.negotiations.set(negId, neg);
 
     if (!provider) {
-      // No agent listed for this serviceId — reject so the requester fails fast.
-      this._push(requester, "negotiation_rejected", {
+      neg.status = "rejected";
+      this._push(requester, {
+        type: "order_negotiation_rejected",
         negotiation_id: negId,
+        service_id: serviceId,
         reason: "no provider registered for service",
       });
       return {
-        id: negId,
-        service_id: serviceId,
+        negotiationId: negId,
+        serviceId,
         status: "rejected",
-        reason: "unknown service",
+        requirements: neg.requirements,
       };
     }
 
-    this._push(provider, "negotiation_created", {
+    this._push(provider, {
+      type: "order_negotiation_created",
       negotiation_id: negId,
       service_id: serviceId,
-      requirements: req.requirements,
     });
-    return { id: negId, service_id: serviceId, status: "pending" };
+    return {
+      negotiationId: negId,
+      serviceId,
+      status: "pending",
+      requirements: neg.requirements,
+    };
   }
 
   accept(provider, negId) {
@@ -104,63 +111,75 @@ class MockBroker {
     neg.status = "accepted";
     const orderId = nextId("ord");
     const order = {
-      id: orderId,
+      orderId,
       negotiationId: negId,
       serviceId: neg.serviceId,
-      requirements: neg.requirements,
-      requester: neg.requester,
-      provider,
-      amount: MOCK_PRICE_USDC,
+      requesterAgentId: neg.requesterAgentId,
+      providerAgentId: provider.id,
+      price: MOCK_PRICE_USDC,
+      paymentToken: "USDC",
       status: "created",
+      _requester: neg._requester,
+      _provider: provider,
     };
     this.orders.set(orderId, order);
-    this._push(neg.requester, "order_created", {
+    this._push(neg._requester, {
+      type: "order_created",
       order_id: orderId,
       negotiation_id: negId,
       service_id: neg.serviceId,
-      amount: order.amount,
     });
-    return { order_id: orderId, negotiation_id: negId, status: "created" };
+    return { negotiation: this._negView(neg), order: this._orderView(order) };
   }
 
   reject(_party, negId, reason) {
     const neg = this.negotiations.get(negId);
-    if (neg) neg.status = "rejected";
-    if (neg) {
-      this._push(neg.requester, "negotiation_rejected", {
-        negotiation_id: negId,
-        reason: reason || "rejected",
-      });
-    }
+    if (!neg) return;
+    neg.status = "rejected";
+    this._push(neg._requester, {
+      type: "order_negotiation_rejected",
+      negotiation_id: negId,
+      service_id: neg.serviceId,
+      reason: reason || "rejected",
+    });
   }
 
   pay(_requester, orderId) {
     const order = this.orders.get(orderId);
     if (!order) throw apiError("not_found", "order not found");
     order.status = "paid";
-    // Deterministic fake settlement tx hash on Base.
-    const txHash = "0x" + "ab".repeat(32);
-    this._push(order.provider, "order_paid", {
+    const txHash = "0x" + "ab".repeat(32); // deterministic fake Base tx hash
+    order.payTxHash = txHash;
+    this._push(order._provider, {
+      type: "order_paid",
       order_id: orderId,
-      tx_hash: txHash,
-      amount: order.amount,
+      negotiation_id: order.negotiationId,
+      service_id: order.serviceId,
     });
-    return { order_id: orderId, tx_hash: txHash, status: "paid" };
+    return { order: this._orderView(order), txHash };
   }
 
   deliver(_provider, orderId, req) {
     const order = this.orders.get(orderId);
     if (!order) throw apiError("not_found", "order not found");
     order.status = "completed";
-    this.deliveries.set(orderId, {
-      deliverable_type: req.deliverableType,
-      deliverable_text: req.deliverableText,
-    });
-    this._push(order.requester, "order_completed", {
+    const delivery = {
+      orderId,
+      deliverableType: req.deliverableType,
+      deliverableText: req.deliverableText || "",
+      deliverableSchema: req.deliverableSchema || "",
+      status: "submitted",
+    };
+    this.deliveries.set(orderId, delivery);
+    this._push(order._requester, {
+      type: "order_completed",
       order_id: orderId,
-      status: "completed",
     });
-    return { order_id: orderId, status: "completed" };
+    return {
+      order: this._orderView(order),
+      delivery,
+      txHash: "0x" + "cd".repeat(32),
+    };
   }
 
   getDelivery(orderId) {
@@ -172,13 +191,35 @@ class MockBroker {
   getOrder(orderId) {
     const o = this.orders.get(orderId);
     if (!o) throw apiError("not_found", "order not found");
+    return this._orderView(o);
+  }
+
+  getNegotiation(negId) {
+    const n = this.negotiations.get(negId);
+    if (!n) throw apiError("not_found", "negotiation not found");
+    return this._negView(n);
+  }
+
+  _negView(n) {
     return {
-      id: o.id,
+      negotiationId: n.negotiationId,
+      serviceId: n.serviceId,
+      requirements: n.requirements,
+      requesterAgentId: n.requesterAgentId,
+      providerAgentId: n.providerAgentId,
+      status: n.status,
+    };
+  }
+
+  _orderView(o) {
+    return {
+      orderId: o.orderId,
+      negotiationId: o.negotiationId,
+      serviceId: o.serviceId,
+      price: o.price,
+      paymentToken: o.paymentToken,
       status: o.status,
-      requirements: o.requirements,
-      service_id: o.serviceId,
-      amount: o.amount,
-      negotiation_id: o.negotiationId,
+      payTxHash: o.payTxHash || "",
     };
   }
 }
@@ -193,26 +234,41 @@ function resetBroker() {
   return _broker;
 }
 
-// A minimal stream that mirrors the real SDK's WebSocket stream (EventEmitter + close()).
+// A stream that mirrors the real SDK EventStream (on / onAny / close).
 class MockStream extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(0);
+    this._any = [];
+  }
+  onAny(handler) {
+    this._any.push(handler);
+  }
+  emit(type, event) {
+    for (const h of this._any) {
+      try {
+        h(event);
+      } catch (_) {
+        /* ignore handler throw */
+      }
+    }
+    return super.emit(type, event);
   }
   close() {
     this.removeAllListeners();
+    this._any = [];
   }
 }
 
 /**
- * Drop-in stand-in for `new AgentClient(config, apiKey)`. Same method names and
- * return shapes as the real SDK so `core.js` does not branch on mode at call sites.
+ * Drop-in stand-in for `new AgentClient(config, sdkKey)`. Same method names and
+ * return shapes as @croo-network/sdk@0.2.1 so `core.js` does not branch on mode.
  */
 class MockAgentClient {
-  constructor(config = {}, apiKey = "") {
+  constructor(config = {}, sdkKey = "") {
     this.config = config;
-    this.apiKey = apiKey;
-    this.id = apiKey || nextId("agent");
+    this.sdkKey = sdkKey;
+    this.id = sdkKey || nextId("agent");
     this.stream = new MockStream();
     this.broker = getBroker();
     this.broker.attach(this);
@@ -247,6 +303,9 @@ class MockAgentClient {
   }
   async getOrder(orderId) {
     return this.broker.getOrder(orderId);
+  }
+  async getNegotiation(negotiationId) {
+    return this.broker.getNegotiation(negotiationId);
   }
 
   close() {

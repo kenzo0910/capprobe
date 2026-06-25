@@ -3,7 +3,8 @@ node_modules/
 
 # secrets / local config — NEVER commit
 .env
-.env.local
+.env.*
+!.env.example
 *.pem
 *.key
 

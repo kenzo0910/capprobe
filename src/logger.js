@@ -26,7 +26,7 @@ function redactMeta(meta) {
   try {
     return JSON.stringify(meta, (key, value) => {
       if (
-        /(privatekey|private_key|secret|apikey|api_key|mnemonic|password)/i.test(
+        /(privatekey|private_key|secret|apikey|api_key|sdkkey|sdk_key|token|bearer|authorization|mnemonic|password)/i.test(
           key,
         )
       ) {

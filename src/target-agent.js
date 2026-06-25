@@ -9,7 +9,7 @@
  * In production you would point CAPProbe at YOUR agent's serviceId instead.
  */
 
-const { loadConfig, createAgent } = require("./core");
+const { loadConfig, createAgent, EV } = require("./core");
 const { Logger } = require("./logger");
 
 async function createTarget(overrides = {}) {
@@ -23,15 +23,15 @@ async function createTarget(overrides = {}) {
     title: "Echo Agent",
     description: "Echoes the request payload back. Demo target for CAPProbe.",
     price: "0.01",
-    deliverableType: "application/json",
+    deliverableType: "text",
   });
   log.info("echo target online", { serviceId, mode: cfg.mode });
 
-  agent.on("negotiation_created", async (p) => {
+  agent.on(EV.NEGOTIATION_CREATED, async (p) => {
     await agent.acceptNegotiation(p.negotiationId);
   });
 
-  agent.on("order_paid", async (p) => {
+  agent.on(EV.ORDER_PAID, async (p) => {
     const payload = {
       agent: "echo",
       orderId: p.orderId,
@@ -39,7 +39,7 @@ async function createTarget(overrides = {}) {
       ts: new Date().toISOString(),
     };
     await agent.deliver(p.orderId, {
-      type: "application/json",
+      type: "text",
       text: JSON.stringify(payload),
     });
     log.info("echo delivered", { orderId: p.orderId });
