@@ -1,0 +1,44 @@
+{
+  "name": "capprobe",
+  "version": "1.0.0",
+  "description": "CAPProbe — a paid CROO agent that conformance-tests other CAP agents (negotiate -> pay -> deliver) and returns a scored A2A health report. Built for the CROO Agent Hackathon.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/core.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "capprobe": "scripts/probe.js"
+  },
+  "scripts": {
+    "demo": "node scripts/test-local.js",
+    "test": "node scripts/test-local.js",
+    "start": "node src/provider.js",
+    "start:provider": "node src/provider.js",
+    "start:requester": "node src/requester-demo.js",
+    "start:target": "node src/target-agent.js",
+    "probe": "node scripts/probe.js"
+  },
+  "keywords": [
+    "croo",
+    "cap",
+    "agent",
+    "a2a",
+    "usdc",
+    "base",
+    "conformance",
+    "developer-tooling",
+    "hackathon",
+    "dorahacks"
+  ],
+  "dependencies": {},
+  "peerDependencies": {
+    "@croo-network/sdk": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@croo-network/sdk": {
+      "optional": true
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# secrets / local config — NEVER commit
+.env
+.env.local
+*.pem
+*.key
+
+# logs & runtime
+logs/
+*.log
+npm-debug.log*
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
