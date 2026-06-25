@@ -39,7 +39,7 @@ See [`src/requester-demo.js`](../src/requester-demo.js) for the full buyer loop.
 ## 3. Gate CI on conformance (GitHub Action)
 
 ```yaml
-- uses: OWNER/REPO@v1
+- uses: kenzo0910/capprobe@v1
   with:
     service-id: my.agent.v1
     api-key: ${{ secrets.CROO_API_KEY }}

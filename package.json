@@ -13,6 +13,7 @@
   },
   "scripts": {
     "demo": "node scripts/test-local.js",
+    "demo:full": "node scripts/probe-full.js",
     "test": "node --test \"test/**/*.test.js\" && node scripts/test-local.js",
     "test:unit": "node --test \"test/**/*.test.js\"",
     "test:e2e": "node scripts/test-local.js",

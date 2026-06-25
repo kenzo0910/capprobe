@@ -6,11 +6,12 @@
 
 **Track:** Developer Tooling (also fits Open) · **License:** MIT · **Built on:** CROO Agent Protocol (CAP), USDC on Base
 
-[![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/ci.yml) · verified against `@croo-network/sdk@0.2.1`
+![tests](https://img.shields.io/badge/tests-22%20passing-brightgreen) · verified against `@croo-network/sdk@0.2.1`
 
 ![CAPProbe architecture](docs/architecture.svg)
 
-> Replace `OWNER/REPO` in the badge URL after you push to GitHub.
+> CI workflow lives in [`docs/ci-workflow.yml`](docs/ci-workflow.yml) — move it to
+> `.github/workflows/ci.yml` (token with `workflow` scope, or the GitHub web UI) to enable Actions.
 
 ---
 
@@ -174,7 +175,7 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     steps:
-      - uses: OWNER/REPO@v1 # the CAPProbe repo
+      - uses: kenzo0910/capprobe@v1 # the CAPProbe repo
         with:
           service-id: my.agent.v1
           api-key: ${{ secrets.CROO_API_KEY }}
@@ -219,16 +220,17 @@ capprobe/
 │   ├── mock-sdk.js        # in-process CROO server simulation (offline demo/CI)
 │   └── logger.js          # zero-dep structured logger with secret redaction
 ├── scripts/
-│   ├── test-local.js      # offline end-to-end demo + assertions (npm run demo)
-│   └── probe.js           # CLI: probe a live agent from the terminal
+│   ├── test-local.js      # offline 3-hop demo + assertions (npm run demo)
+│   ├── probe-full.js      # full 3-hop A2A in one command, mock or live (npm run demo:full)
+│   └── probe.js           # CLI: direct probe of a live agent (npm run probe)
 ├── test/                  # node:test unit + SDK-contract suite (npm run test:unit)
 │   ├── scoring.test.js
 │   ├── adapter.test.js
 │   ├── probe.test.js
 │   └── sdk-contract.test.js
-├── .github/workflows/ci.yml  # CI: tests on node 18/20/22
 ├── action.yml             # reusable GitHub Action (CAPProbe as a CI gate)
 ├── docs/architecture.svg
+├── docs/ci-workflow.yml   # CI config (move to .github/workflows/ to enable)
 ├── .env.example
 ├── JUDGING.md             # self-review + simulated judge scorecard
 ├── LICENSE                # MIT

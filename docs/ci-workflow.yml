@@ -1,0 +1,32 @@
+# CI workflow for CAPProbe.
+#
+# To ENABLE: move this file to `.github/workflows/ci.yml` and push with a GitHub
+# token that has the `workflow` scope (or add it via the GitHub web UI:
+# repo → Actions → "New workflow" → paste this content). It is kept here because
+# the initial push used a token without `workflow` scope.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # Installs the optional @croo-network/sdk so the SDK-contract test runs
+      # too (it skips automatically if the install is unavailable).
+      - run: npm install --no-audit --no-fund
+      - run: npm test
