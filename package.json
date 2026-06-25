@@ -14,8 +14,8 @@
   "scripts": {
     "demo": "node scripts/test-local.js",
     "demo:full": "node scripts/probe-full.js",
-    "test": "node --test \"test/**/*.test.js\" && node scripts/test-local.js",
-    "test:unit": "node --test \"test/**/*.test.js\"",
+    "test": "node --test test/scoring.test.js test/adapter.test.js test/probe.test.js test/sdk-contract.test.js && node scripts/test-local.js",
+    "test:unit": "node --test test/scoring.test.js test/adapter.test.js test/probe.test.js test/sdk-contract.test.js",
     "test:e2e": "node scripts/test-local.js",
     "start": "node src/provider.js",
     "start:provider": "node src/provider.js",
