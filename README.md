@@ -6,12 +6,9 @@
 
 **Track:** Developer Tooling (also fits Open) · **License:** MIT · **Built on:** CROO Agent Protocol (CAP), USDC on Base
 
-![tests](https://img.shields.io/badge/tests-22%20passing-brightgreen) · verified against `@croo-network/sdk@0.2.1`
+[![CI](https://github.com/kenzo0910/capprobe/actions/workflows/ci.yml/badge.svg)](https://github.com/kenzo0910/capprobe/actions/workflows/ci.yml) · verified against `@croo-network/sdk@0.2.1`
 
 ![CAPProbe architecture](docs/architecture.svg)
-
-> CI workflow lives in [`docs/ci-workflow.yml`](docs/ci-workflow.yml) — move it to
-> `.github/workflows/ci.yml` (token with `workflow` scope, or the GitHub web UI) to enable Actions.
 
 ---
 
@@ -228,9 +225,9 @@ capprobe/
 │   ├── adapter.test.js
 │   ├── probe.test.js
 │   └── sdk-contract.test.js
+├── .github/workflows/ci.yml  # CI: tests on node 18/20/22
 ├── action.yml             # reusable GitHub Action (CAPProbe as a CI gate)
 ├── docs/architecture.svg
-├── docs/ci-workflow.yml   # CI config (move to .github/workflows/ to enable)
 ├── .env.example
 ├── JUDGING.md             # self-review + simulated judge scorecard
 ├── LICENSE                # MIT
